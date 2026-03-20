@@ -17,7 +17,9 @@ export async function incrementAndCheckMonthlyUsage(
   count: number,
   limit: number
 ): Promise<{ allowed: boolean; newTotal: number }> {
-  const { data, error } = await getDb().rpc('increment_usage_check_limit', {
+  const db = getDb() as any;
+
+  const { data, error } = await db.rpc('increment_usage_check_limit', {
     p_api_key_id: apiKeyId,
     p_count: count,
     p_limit: limit,
@@ -49,7 +51,8 @@ export async function logCategorizations(
     confidence: result.confidence,
   }));
 
-  const { error } = await getDb().from('categorization_logs').insert(logs);
+  const db = getDb() as any;
+  const { error } = await db.from('categorization_logs').insert(logs);
 
   if (error) {
     console.error('Error logging categorizations (non-fatal):', error);

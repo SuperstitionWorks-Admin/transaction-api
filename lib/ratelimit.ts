@@ -46,11 +46,11 @@ class InMemoryRateLimiter {
 
   cleanup(): void {
     const now = Date.now();
-    for (const [key, record] of this.records) {
+    this.records.forEach((record, key) => {
       if (now > record.resetTime) {
         this.records.delete(key);
       }
-    }
+    });
   }
 }
 

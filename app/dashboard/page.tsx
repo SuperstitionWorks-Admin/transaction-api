@@ -25,18 +25,30 @@ async function getDashboardData() {
     console.error('Error fetching categories:', categoriesResult.error);
   }
 
-  const totalRequests =
-    usageResult.data?.reduce((sum, row) => sum + (row.request_count || 0), 0) ?? 0;
+  const usageRows = (usageResult.data ?? []) as Array<{ request_count: number | null }>;
 
-  const recentLogs = logsResult.data ?? [];
-  const totalCategorized = recentLogs.length;
+const recentLogs = (logsResult.data ?? []) as Array<{
+  original_text: string;
+  normalized_text: string;
+  merchant: string | null;
+  category: string | null;
+  confidence: number | null;
+  created_at: string | null;
+}>;
 
-  const categoryBreakdown =
-    categoriesResult.data?.reduce<Record<string, number>>((acc, row) => {
-      const category = row.category || 'uncategorized';
-      acc[category] = (acc[category] || 0) + 1;
-      return acc;
-    }, {}) ?? {};
+const categoryRows = (categoriesResult.data ?? []) as Array<{ category: string | null }>;
+
+const totalRequests =
+  usageRows.reduce((sum, row) => sum + (row.request_count || 0), 0);
+
+const totalCategorized = recentLogs.length;
+
+const categoryBreakdown =
+  categoryRows.reduce<Record<string, number>>((acc, row) => {
+    const category = row.category || 'uncategorized';
+    acc[category] = (acc[category] || 0) + 1;
+    return acc;
+  }, {});
 
   return {
     totalRequests,
