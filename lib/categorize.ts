@@ -129,17 +129,68 @@ const COMPILED_MERCHANTS: CompiledMerchant[] = MERCHANTS.map((rule) => ({
 }));
 
 // ─── Matching helpers ─────────────────────────────────────────────────────────
+function matchesStrictExactPattern(normalized: string, pattern: string): boolean {
+  const text = normalized.toLowerCase().trim();
+  const p = pattern.toLowerCase().trim();
 
+  // Ambiguous merchants need stricter handling than plain whole-word matching.
+  if (p === 'shell') {
+    return /^shell(?:\s+(oil|gas|fuel|station|service))?$/i.test(text);
+  }
+
+  if (p === 'bp') {
+    return /^bp(?:\s+(oil|gas|fuel|station|service))?$/i.test(text);
+  }
+
+  if (p === 'amc') {
+    return /^amc(?:\s+(movie|cinema|theatre|theater))?$/i.test(text);
+  }
+
+  return new RegExp(`(^|\\s)${escapeRegex(p)}(\\s|$)`, 'i').test(text);
+}
 function findMerchantMatch(normalized: string): MerchantRule | null {
-  for (const { rule, regexes } of COMPILED_MERCHANTS) {
-    if (regexes) {
-      // Exact: pattern must appear as a whole word (or the entire string)
-      if (regexes.some((re) => re.test(normalized))) return rule;
-    } else {
-      // Partial: pattern appears anywhere in the string
-      if (rule.patterns.some((p) => normalized.includes(p))) return rule;
+  const text = normalized.toLowerCase().trim();
+
+  for (const rule of MERCHANTS) {
+    for (const pattern of rule.patterns) {
+      const p = pattern.toLowerCase().trim();
+
+      if (rule.matchType === 'exact') {
+        // Special-case ambiguous exact merchants only.
+        if (p === 'shell') {
+          if (/^shell(?:\s+(oil|gas|fuel|station|service))?$/i.test(text)) {
+            return rule;
+          }
+          continue;
+        }
+
+        if (p === 'bp') {
+          if (/^bp(?:\s+(oil|gas|fuel|station|service))?$/i.test(text)) {
+            return rule;
+          }
+          continue;
+        }
+
+        if (p === 'amc') {
+          if (/^amc(?:\s+(movie|cinema|theatre|theater))?$/i.test(text)) {
+            return rule;
+          }
+          continue;
+        }
+
+        // Default exact behavior for normal merchants.
+        const re = new RegExp(`(^|\\s)${escapeRegex(p)}(\\s|$)`, 'i');
+        if (re.test(text)) {
+          return rule;
+        }
+      } else {
+        if (text.includes(p)) {
+          return rule;
+        }
+      }
     }
   }
+
   return null;
 }
 
@@ -228,7 +279,7 @@ export function categorizeTransaction(description: string): CategorizedTransacti
   return {
     original: description,
     normalized,
-    merchant: extractMerchantName(normalized),
+    merchant: 'Unknown',
     category: 'uncategorized',
     confidence: calculateConfidence('uncategorized', normalized),
   };
