@@ -1,8 +1,8 @@
-import { CategorizeRequest } from '@/types/api';
+import { CategorizeRequest, ApiErrorCode } from '@/types/api';
 
 interface ValidationResult {
   valid: boolean;
-  error?: string;
+  error?: ApiErrorCode;
   message?: string;
   data?: CategorizeRequest;
 }
