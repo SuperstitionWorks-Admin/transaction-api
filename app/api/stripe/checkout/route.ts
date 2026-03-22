@@ -2,6 +2,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createCheckoutSession } from '@/lib/stripe';
 import { getPlanById } from '@/lib/plans';
 
+// ─── Server-side Stripe Price ID map ─────────────────────────────────────────
+//
+// Kept here — not in lib/plans.ts — so these env vars are never bundled into
+// client code.  process.env is evaluated at request time on the server, so the
+// values will be present as long as they're set in your Vercel environment.
+
+const STRIPE_PRICE_IDS: Record<string, string | undefined> = {
+  starter: process.env.STRIPE_PRICE_STARTER,
+  pro: process.env.STRIPE_PRICE_PRO,
+};
+
 export async function POST(request: NextRequest) {
   try {
     // ── Auth ─────────────────────────────────────────────────────────────────
@@ -49,10 +60,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!plan.priceId) {
-      // This means STRIPE_PRICE_* env vars are not set.  validatePlanConfig()
-      // should have caught this at startup — reaching here is a config error.
-      console.error(`Plan "${plan.id}" has no priceId — check STRIPE_PRICE_* env vars`);
+    // Resolve the Stripe Price ID server-side from env vars.
+    const priceId = STRIPE_PRICE_IDS[plan.id];
+
+    if (!priceId) {
+      // Reached only if STRIPE_PRICE_* env vars are missing for this plan.
+      console.error(
+        `No Stripe Price ID configured for plan "${plan.id}". ` +
+          'Check STRIPE_PRICE_STARTER / STRIPE_PRICE_PRO in your environment.'
+      );
       return NextResponse.json(
         { error: 'Plan not available' },
         { status: 503 }
@@ -67,7 +83,7 @@ export async function POST(request: NextRequest) {
       'http://localhost:3000';
 
     const checkoutUrl = await createCheckoutSession({
-      priceId: plan.priceId,
+      priceId,
       successUrl: `${baseUrl}/dashboard?checkout=success`,
       cancelUrl: `${baseUrl}/pricing?checkout=cancelled`,
       // customerEmail,   // uncomment once auth is wired up

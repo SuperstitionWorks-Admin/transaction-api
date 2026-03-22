@@ -3,7 +3,7 @@ import { headers } from 'next/headers';
 import Stripe from 'stripe';
 import { getStripe } from '@/lib/stripe';
 import { getDb } from '@/lib/db';
-import { getPlanByPriceId, PLANS } from '@/lib/plans';
+import { PLANS, getPlanById, type PlanId } from '@/lib/plans';
 import { generateApiKey, hashApiKey } from '@/lib/hash';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -12,6 +12,18 @@ function getWebhookSecret(): string {
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
   if (!secret) throw new Error('Missing env var: STRIPE_WEBHOOK_SECRET');
   return secret;
+}
+
+function getPlanByStripePriceId(priceId: string): { id: PlanId; monthlyLimit: number } | null {
+  if (priceId === process.env.STRIPE_PRICE_STARTER) {
+    return { id: 'starter', monthlyLimit: 10000 };
+  }
+
+  if (priceId === process.env.STRIPE_PRICE_PRO) {
+    return { id: 'pro', monthlyLimit: 100000 };
+  }
+
+  return null;
 }
 
 const FREE_PLAN = PLANS.find((p) => p.id === 'free');
@@ -143,7 +155,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     return;
   }
 
-  const plan = getPlanByPriceId(priceId);
+  const plan = getPlanByStripePriceId(priceId);
   if (!plan) {
     console.error('No plan found for priceId', { priceId });
     return;
@@ -168,7 +180,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     // Update the limit in place — don't generate a new key on upgrade.
     await db
       .from('api_keys')
-      .update({ monthly_limit: plan.requestLimit, is_active: true })
+      .update({ monthly_limit: plan.monthlyLimit, is_active: true })
       .eq('id', apiKeyId);
   } else {
     // New customer: generate a real cryptographic key and store only its hash.
@@ -178,9 +190,9 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     const { data: newKey, error: insertError } = await db
       .from('api_keys')
       .insert({
-        name: `${plan.name} Plan`,
+        name: `${plan.id.charAt(0).toUpperCase() + plan.id.slice(1)} Plan`,
         key_hash: keyHash,
-        monthly_limit: plan.requestLimit,
+        monthly_limit: plan.monthlyLimit,
         is_active: true,
         stripe_customer_id: customerId,
         ...(metadata?.userId ? { user_id: metadata.userId } : {}),
@@ -237,7 +249,7 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
     return;
   }
 
-  const plan = getPlanByPriceId(priceId);
+  const plan = getPlanByStripePriceId(priceId);
   if (!plan) {
     console.error('No plan found for priceId on update', { priceId });
     return;
@@ -280,7 +292,7 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
   await db
     .from('api_keys')
     .update({
-      monthly_limit: isActive ? plan.requestLimit : FREE_LIMIT,
+      monthly_limit: isActive ? plan.monthlyLimit : FREE_LIMIT,
       is_active: isActive,
     })
     .eq('id', existingSub.api_key_id);

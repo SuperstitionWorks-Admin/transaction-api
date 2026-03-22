@@ -29,8 +29,7 @@ export async function incrementAndCheckMonthlyUsage(
     throw new Error(`Failed to check/increment monthly usage: ${error.message}`);
   }
 
-  const result = data as { allowed: boolean; new_total: number };
-  return { allowed: result.allowed, newTotal: result.new_total };
+  return data as { allowed: boolean; newTotal: number };
 }
 
 /**
