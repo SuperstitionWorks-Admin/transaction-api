@@ -231,7 +231,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   const { data: existingKey } = await db
     .from('api_keys')
     .select('id')
-    .eq('stripe_customer_id', customerId)
+    .eq('user_id', metadata.userId)
     .maybeSingle() as { data: { id: string } | null };
 
   if (existingKey) {
@@ -254,7 +254,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
         key_hash: keyHash,
         monthly_limit: plan.monthlyLimit,
         is_active: true,
-        stripe_customer_id: customerId,
+        userId: metadata.userId,
         ...(metadata?.userId ? { user_id: metadata.userId } : {}),
       })
       .select('id')
