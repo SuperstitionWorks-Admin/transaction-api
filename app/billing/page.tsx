@@ -159,12 +159,18 @@ export default function BillingPage() {
                       </span>
                       <Badge
                         className={
-                          billing.hasActiveSubscription
+                          billing.planName === 'Free'
+                            ? 'bg-slate-100 text-slate-800'
+                            : billing.hasActiveSubscription
                             ? 'bg-green-100 text-green-800'
                             : 'bg-yellow-100 text-yellow-800'
                         }
                       >
-                        {billing.hasActiveSubscription ? 'active' : 'inactive'}
+                        {billing.planName === 'Free'
+                          ? 'free'
+                          : billing.hasActiveSubscription
+                          ? 'active'
+                          : 'inactive'}
                       </Badge>
                     </div>
                     <p className="text-sm text-slate-600">
