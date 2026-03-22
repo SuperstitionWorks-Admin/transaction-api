@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { headers } from 'next/headers';
 import Stripe from 'stripe';
 import { getStripe } from '@/lib/stripe';
 import { getDb } from '@/lib/db';
@@ -29,6 +28,30 @@ function getPlanByStripePriceId(priceId: string): { id: PlanId; monthlyLimit: nu
 const FREE_PLAN = PLANS.find((p) => p.id === 'free');
 const FREE_LIMIT = FREE_PLAN?.requestLimit ?? 500;
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Safely converts a Stripe epoch timestamp to an ISO string.
+ *
+ * current_period_end is typed as `number` in older Stripe SDK versions but
+ * may be absent or non-numeric at runtime depending on the pinned API version.
+ * Calling new Date(NaN).toISOString() throws a RangeError — this was the root
+ * cause of the 500: api_keys wrote successfully (it runs first), then this
+ * crash prevented the subscriptions row from ever being inserted.
+ */
+function epochToISOSafe(value: unknown, label: string): string | null {
+  if (typeof value !== 'number' || isNaN(value)) {
+    console.warn(`[webhook] ${label} is not a valid epoch number:`, value);
+    return null;
+  }
+  const date = new Date(value * 1000);
+  if (isNaN(date.getTime())) {
+    console.warn(`[webhook] ${label} produced an invalid Date from value:`, value);
+    return null;
+  }
+  return date.toISOString();
+}
+
 // ─── Route ────────────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
@@ -39,8 +62,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Could not read body' }, { status: 400 });
   }
 
-  const headersList = await headers();
-  const signature = headersList.get('stripe-signature');
+  // Use request.headers directly — simpler and more reliable than importing
+  // headers() from next/headers, which requires an active App Router async
+  // context and adds an unnecessary await.
+  const signature = request.headers.get('stripe-signature');
 
   if (!signature) {
     return NextResponse.json({ error: 'No signature provided' }, { status: 400 });
@@ -50,9 +75,11 @@ export async function POST(request: NextRequest) {
   try {
     event = getStripe().webhooks.constructEvent(body, signature, getWebhookSecret());
   } catch (err) {
-    console.error('Webhook signature verification failed:', err);
+    console.error('[webhook] Signature verification failed:', err);
     return NextResponse.json({ error: 'Invalid signature' }, { status: 400 });
   }
+
+  console.log(`[webhook] Received event: ${event.type} (id: ${event.id})`);
 
   try {
     switch (event.type) {
@@ -80,7 +107,7 @@ export async function POST(request: NextRequest) {
     }
   } catch (err) {
     // Return 500 so Stripe retries the event. Log the full error for debugging.
-    console.error(`Error handling ${event.type} (id: ${event.id}):`, err);
+    console.error(`[webhook] Error handling ${event.type} (id: ${event.id}):`, err);
     return NextResponse.json({ error: 'Handler failed' }, { status: 500 });
   }
 
@@ -99,19 +126,23 @@ export async function POST(request: NextRequest) {
  * See checkout route: metadata: { planId, userId: session.user.id }
  */
 async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
+  console.log(`[webhook] handleCheckoutCompleted session.id=${session.id}`);
+
   const { customer, subscription, metadata } = session;
 
   if (!customer || !subscription) {
-    console.error('checkout.session.completed missing customer or subscription', {
+    console.error('[webhook] checkout.session.completed missing customer or subscription', {
       sessionId: session.id,
+      customer,
+      subscription,
     });
     return;
   }
 
   if (!metadata?.planId) {
     console.error(
-      'checkout.session.completed missing metadata.planId — was it set at checkout?',
-      { sessionId: session.id }
+      '[webhook] checkout.session.completed missing metadata.planId — was it set at checkout?',
+      { sessionId: session.id, metadata }
     );
     return;
   }
@@ -119,7 +150,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   // Warn loudly if userId is missing — access will be created but not linked.
   if (!metadata?.userId) {
     console.warn(
-      'checkout.session.completed missing metadata.userId. ' +
+      '[webhook] checkout.session.completed missing metadata.userId. ' +
         'The API key will be created but cannot be linked to a user account. ' +
         'Add userId to checkout session metadata.'
     );
@@ -127,6 +158,8 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
 
   const customerId     = typeof customer     === 'string' ? customer     : customer.id;
   const subscriptionId = typeof subscription === 'string' ? subscription : subscription.id;
+
+  console.log(`[webhook] customerId=${customerId} subscriptionId=${subscriptionId}`);
 
   // Cast to any once here — db.ts has no Database generic, so every table
   // resolves to `never` without it.  A single cast is cleaner than sprinkling
@@ -143,33 +176,49 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
 
   if (existingSub) {
     // Already processed (e.g. Stripe retried the event). Nothing to do.
+    console.log(`[webhook] Already processed subscriptionId=${subscriptionId}, skipping.`);
     return;
   }
 
   // Fetch the full subscription to get the priceId.
   const subscriptionData = await getStripe().subscriptions.retrieve(subscriptionId);
-  const firstItem = subscriptionData.items.data[0];
 
-  if (!firstItem || !firstItem.price?.id) {
-    console.error('Missing price data in subscription', {
+  const firstItem = subscriptionData.items?.data?.[0];
+
+  if (!firstItem) {
+    console.error('[webhook] Subscription has no line items', {
       subscriptionId,
-      items: subscriptionData.items.data,
+      itemCount: subscriptionData.items?.data?.length ?? 0,
     });
-    throw new Error('Missing price data in subscription');
+    throw new Error('Missing line items in subscription');
   }
 
-  const priceId = firstItem.price.id;
+  const priceId = firstItem.price?.id;
 
   if (!priceId) {
-    console.error('No price ID in subscription', { subscriptionId });
-    return;
+    console.error('[webhook] Missing price ID on subscription item', {
+      subscriptionId,
+      item: firstItem,
+    });
+    throw new Error('Missing price ID in subscription item');
   }
 
+  console.log(`[webhook] priceId=${priceId}`);
+
   const plan = getPlanByStripePriceId(priceId);
+
   if (!plan) {
-    console.error('No plan found for priceId', { priceId });
-    return;
+    // Throw (not return) so Stripe retries — this could be a transient config
+    // issue (e.g. env vars not yet deployed) rather than a permanent bad event.
+    console.error('[webhook] No plan mapped for priceId. Check env vars.', {
+      priceId,
+      STRIPE_PRICE_STARTER: process.env.STRIPE_PRICE_STARTER ?? '(not set)',
+      STRIPE_PRICE_PRO: process.env.STRIPE_PRICE_PRO ?? '(not set)',
+    });
+    throw new Error(`No plan found for priceId: ${priceId}`);
   }
+
+  console.log(`[webhook] Mapped plan: ${plan.id} (monthlyLimit: ${plan.monthlyLimit})`);
 
   // ── Provision the API key ────────────────────────────────────────────────
   //
@@ -192,6 +241,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
       .from('api_keys')
       .update({ monthly_limit: plan.monthlyLimit, is_active: true })
       .eq('id', apiKeyId);
+    console.log(`[webhook] Updated existing api_key id=${apiKeyId}`);
   } else {
     // New customer: generate a real cryptographic key and store only its hash.
     rawKey = generateApiKey();
@@ -211,13 +261,14 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
       .single() as { data: { id: string } | null; error: unknown };
 
     if (insertError || !newKey) {
-      console.error('Failed to insert API key', insertError);
+      console.error('[webhook] Failed to insert API key', insertError);
       // Throw so Stripe retries. The idempotency guard above prevents
       // double-insertion once a retry succeeds.
       throw new Error('Failed to insert API key');
     }
 
     apiKeyId = newKey.id;
+    console.log(`[webhook] Created new api_key id=${apiKeyId}`);
   }
 
   // TODO: deliver rawKey to the user.
@@ -229,11 +280,19 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   if (rawKey) {
     console.log(
       `[ACTION REQUIRED] New API key created for customer ${customerId}. ` +
-        `Raw key must be delivered to user. keyId=${apiKeyId}`
+        `Raw key must be delivered to the user. keyId=${apiKeyId}`
     );
   }
 
   // ── Record the subscription ──────────────────────────────────────────────
+
+  // current_period_end is not guaranteed to be a top-level typed property
+  // for all pinned Stripe API versions. Read it through a plain Record cast
+  // and convert safely — an invalid epoch used to crash toISOString() here
+  // and silently abort the insert (while the api_keys write above succeeded).
+  const rawPeriodEnd = (subscriptionData as unknown as Record<string, unknown>).current_period_end;
+  console.log(`[webhook] current_period_end raw value:`, rawPeriodEnd);
+  const currentPeriodEnd = epochToISOSafe(rawPeriodEnd, 'current_period_end');
 
   const { error: subError } = await db.from('subscriptions').insert({
     api_key_id: apiKeyId,
@@ -241,15 +300,17 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     stripe_subscription_id: subscriptionId,
     plan: plan.id,
     status: subscriptionData.status,
-    current_period_end: new Date(
-      (subscriptionData as any).current_period_end * 1000
-    ).toISOString(),
+    // null is intentional — the column should allow it so a bad epoch never
+    // blocks the row from being inserted at all.
+    current_period_end: currentPeriodEnd,
   });
 
   if (subError) {
-    console.error('Failed to insert subscription', subError);
+    console.error('[webhook] Failed to insert subscription row', subError);
     throw new Error('Subscription insert failed');
   }
+
+  console.log(`[webhook] Subscription row inserted for subscriptionId=${subscriptionId}`);
 }
 
 /**
@@ -257,18 +318,26 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
  * Does NOT fire for new subscriptions — that's handled by checkout.session.completed.
  */
 async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
+  console.log(`[webhook] handleSubscriptionUpdated subscriptionId=${subscription.id}`);
+
   const priceId = subscription.items.data[0]?.price.id;
 
   if (!priceId) {
-    console.error('No price ID in updated subscription', { subscriptionId: subscription.id });
+    console.error('[webhook] No price ID in updated subscription', {
+      subscriptionId: subscription.id,
+    });
     return;
   }
 
+  console.log(`[webhook] priceId=${priceId}`);
+
   const plan = getPlanByStripePriceId(priceId);
   if (!plan) {
-    console.error('No plan found for priceId on update', { priceId });
+    console.error('[webhook] No plan found for priceId on update', { priceId });
     return;
   }
+
+  console.log(`[webhook] Mapped plan: ${plan.id}`);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db = getDb() as any;
@@ -283,7 +352,7 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
     // Can happen if checkout.session.completed hasn't been processed yet.
     // Stripe event ordering is not guaranteed. The checkout handler will
     // create the record; this event can be safely ignored for now.
-    console.warn('subscription.updated received before checkout.session.completed', {
+    console.warn('[webhook] subscription.updated received before checkout.session.completed', {
       subscriptionId: subscription.id,
     });
     return;
@@ -292,14 +361,16 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
   const isActive =
     subscription.status === 'active' || subscription.status === 'trialing';
 
+  const rawPeriodEnd = (subscription as unknown as Record<string, unknown>).current_period_end;
+  console.log(`[webhook] current_period_end raw value:`, rawPeriodEnd);
+  const currentPeriodEnd = epochToISOSafe(rawPeriodEnd, 'current_period_end');
+
   await db
     .from('subscriptions')
     .update({
       status: subscription.status,
       plan: plan.id,
-      current_period_end: new Date(
-        (subscription as any).current_period_end * 1000
-      ).toISOString(),
+      current_period_end: currentPeriodEnd,
       updated_at: new Date().toISOString(),
     })
     .eq('stripe_subscription_id', subscription.id);
@@ -311,6 +382,8 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
       is_active: isActive,
     })
     .eq('id', existingSub.api_key_id);
+
+  console.log(`[webhook] Updated subscription and api_key for subscriptionId=${subscription.id}`);
 }
 
 /**
@@ -320,6 +393,8 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
  * re-authentication step.
  */
 async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
+  console.log(`[webhook] handleSubscriptionDeleted subscriptionId=${subscription.id}`);
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db = getDb() as any;
 
@@ -330,7 +405,7 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
     .maybeSingle() as { data: { api_key_id: string } | null };
 
   if (!existingSub) {
-    console.error('subscription.deleted: subscription not found', {
+    console.error('[webhook] subscription.deleted: subscription not found', {
       subscriptionId: subscription.id,
     });
     return;
@@ -347,4 +422,6 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
     .from('api_keys')
     .update({ monthly_limit: FREE_LIMIT, is_active: true })
     .eq('id', existingSub.api_key_id);
+
+  console.log(`[webhook] Downgraded api_key to free tier for subscriptionId=${subscription.id}`);
 }
