@@ -1,0 +1,82 @@
+warning: in the working copy of 'lib/categorize.ts', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/lib/categorize.ts b/lib/categorize.ts[m
+[1mindex 1463f28..c8b9b77 100644[m
+[1m--- a/lib/categorize.ts[m
+[1m+++ b/lib/categorize.ts[m
+[36m@@ -129,17 +129,69 @@[m [mconst COMPILED_MERCHANTS: CompiledMerchant[] = MERCHANTS.map((rule) => ({[m
+ }));[m
+ [m
+ // ─── Matching helpers ─────────────────────────────────────────────────────────[m
+[32m+[m[32mfunction matchesStrictExactPattern(normalized: string, pattern: string): boolean {[m
+[32m+[m[32m  const text = normalized.toLowerCase().trim();[m
+[32m+[m[32m  const p = pattern.toLowerCase().trim();[m
+ [m
+[32m+[m[32m  // Ambiguous merchants need stricter handling than plain whole-word matching.[m
+[32m+[m[32m  if (p === 'shell') {[m
+[32m+[m[32m    return /^shell(?:\s+(oil|gas|fuel|station|service))?$/i.test(text);[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  if (p === 'bp') {[m
+[32m+[m[32m    return /^bp(?:\s+(oil|gas|fuel|station|service))?$/i.test(text);[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  if (p === 'amc') {[m
+[32m+[m[32m    return /^amc(?:\s+(movie|cinema|theatre|theater))?$/i.test(text);[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  return new RegExp(`(^|\\s)${escapeRegex(p)}(\\s|$)`, 'i').test(text);[m
+[32m+[m[32m}[m
+ function findMerchantMatch(normalized: string): MerchantRule | null {[m
+[31m-  for (const { rule, regexes } of COMPILED_MERCHANTS) {[m
+[31m-    if (regexes) {[m
+[31m-      // Exact: pattern must appear as a whole word (or the entire string)[m
+[31m-      if (regexes.some((re) => re.test(normalized))) return rule;[m
+[31m-    } else {[m
+[31m-      // Partial: pattern appears anywhere in the string[m
+[31m-      if (rule.patterns.some((p) => normalized.includes(p))) return rule;[m
+[32m+[m[32m  const text = normalized.toLowerCase().trim();[m
+[32m+[m
+[32m+[m[32m  for (const { rule } of COMPILED_MERCHANTS) {[m
+[32m+[m[32m    for (const pattern of rule.patterns) {[m
+[32m+[m[32m      const p = pattern.toLowerCase().trim();[m
+[32m+[m
+[32m+[m[32m      if (rule.matchType === 'exact') {[m
+[32m+[m[32m        // Special-case ambiguous exact merchants.[m
+[32m+[m[32m        if (p === 'shell') {[m
+[32m+[m[32m          if (/^shell(?:\s+(oil|gas|fuel|station|service))?$/i.test(text)) {[m
+[32m+[m[32m            return rule;[m
+[32m+[m[32m          }[m
+[32m+[m[32m          continue;[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        if (p === 'bp') {[m
+[32m+[m[32m          if (/^bp(?:\s+(oil|gas|fuel|station|service))?$/i.test(text)) {[m
+[32m+[m[32m            return rule;[m
+[32m+[m[32m          }[m
+[32m+[m[32m          continue;[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        if (p === 'amc') {[m
+[32m+[m[32m          if (/^amc(?:\s+(movie|cinema|theatre|theater))?$/i.test(text)) {[m
+[32m+[m[32m            return rule;[m
+[32m+[m[32m          }[m
+[32m+[m[32m          continue;[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m[32m        // Default exact behavior: whole word / whole phrase.[m
+[32m+[m[32m        const re = new RegExp(`(^|\\s)${escapeRegex(p)}(\\s|$)`, 'i');[m
+[32m+[m[32m        if (re.test(text)) {[m
+[32m+[m[32m          return rule;[m
+[32m+[m[32m        }[m
+[32m+[m[32m      } else {[m
+[32m+[m[32m        // Partial match[m
+[32m+[m[32m        if (text.includes(p)) {[m
+[32m+[m[32m          return rule;[m
+[32m+[m[32m        }[m
+[32m+[m[32m      }[m
+     }[m
+   }[m
+[32m+[m
+   return null;[m
+ }[m
+ [m
