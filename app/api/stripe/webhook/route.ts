@@ -290,7 +290,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   // for all pinned Stripe API versions. Read it through a plain Record cast
   // and convert safely — an invalid epoch used to crash toISOString() here
   // and silently abort the insert (while the api_keys write above succeeded).
-  const rawPeriodEnd = (subscriptionData as unknown as Record<string, unknown>).current_period_end;
+  const rawPeriodEnd = subscriptionData.items?.data?.[0]?.current_period_end;
   console.log(`[webhook] current_period_end raw value:`, rawPeriodEnd);
   const currentPeriodEnd = epochToISOSafe(rawPeriodEnd, 'current_period_end');
 
@@ -361,7 +361,7 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
   const isActive =
     subscription.status === 'active' || subscription.status === 'trialing';
 
-  const rawPeriodEnd = (subscription as unknown as Record<string, unknown>).current_period_end;
+  const rawPeriodEnd = subscription.items?.data?.[0]?.current_period_end;
   console.log(`[webhook] current_period_end raw value:`, rawPeriodEnd);
   const currentPeriodEnd = epochToISOSafe(rawPeriodEnd, 'current_period_end');
 
