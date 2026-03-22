@@ -148,7 +148,17 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
 
   // Fetch the full subscription to get the priceId.
   const subscriptionData = await getStripe().subscriptions.retrieve(subscriptionId);
-  const priceId = subscriptionData.items.data[0]?.price.id;
+  const firstItem = subscriptionData.items.data[0];
+
+  if (!firstItem || !firstItem.price?.id) {
+    console.error('Missing price data in subscription', {
+      subscriptionId,
+      items: subscriptionData.items.data,
+    });
+    throw new Error('Missing price data in subscription');
+  }
+
+  const priceId = firstItem.price.id;
 
   if (!priceId) {
     console.error('No price ID in subscription', { subscriptionId });
@@ -225,7 +235,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
 
   // ── Record the subscription ──────────────────────────────────────────────
 
-  await db.from('subscriptions').insert({
+  const { error: subError } = await db.from('subscriptions').insert({
     api_key_id: apiKeyId,
     stripe_customer_id: customerId,
     stripe_subscription_id: subscriptionId,
@@ -235,6 +245,11 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
       (subscriptionData as any).current_period_end * 1000
     ).toISOString(),
   });
+
+  if (subError) {
+    console.error('Failed to insert subscription', subError);
+    throw new Error('Subscription insert failed');
+  }
 }
 
 /**
