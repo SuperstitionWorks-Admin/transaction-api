@@ -35,11 +35,6 @@ export default function BillingPage() {
   const [portalLoading, setPortalLoading] = useState(false);
   const [portalError, setPortalError] = useState<string | null>(null);
 
-  // ── Load billing data ────────────────────────────────────────────────────
-  //
-  // /api/stripe/billing must look up the current user's session server-side
-  // and return BillingData. It must never accept a user-supplied customerId.
-
   useEffect(() => {
     async function loadBilling() {
       try {
@@ -61,10 +56,6 @@ export default function BillingPage() {
 
     loadBilling();
   }, []);
-
-  // ── Manage billing portal ────────────────────────────────────────────────
-  //
-  // No customerId from the client — the server derives it from the session.
 
   const handleManageBilling = async () => {
     setPortalLoading(true);
@@ -99,8 +90,6 @@ export default function BillingPage() {
     window.location.href = '/pricing';
   };
 
-  // ── Render ───────────────────────────────────────────────────────────────
-
   if (loadingBilling) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 flex items-center justify-center">
@@ -122,6 +111,22 @@ export default function BillingPage() {
 
   const usagePercent = Math.min((billing.usageCount / billing.usageLimit) * 100, 100);
 
+  const isFreePlan = billing.planName === 'Free';
+  const isPaidPlan = billing.planName === 'Starter' || billing.planName === 'Pro';
+  const isPaidActive = billing.hasActiveSubscription;
+  const isAccessActive = isFreePlan || isPaidActive;
+
+  const badgeText = isAccessActive ? 'active' : 'inactive';
+  const badgeClass = isAccessActive
+    ? 'bg-green-100 text-green-800'
+    : 'bg-yellow-100 text-yellow-800';
+
+  const showManageBilling = isPaidPlan && isPaidActive;
+
+  const formattedNextBillingDate = billing.nextBillingDate
+    ? new Date(billing.nextBillingDate).toLocaleDateString()
+    : null;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
       <div className="container mx-auto px-4 py-16">
@@ -141,7 +146,6 @@ export default function BillingPage() {
           )}
 
           <div className="grid md:grid-cols-2 gap-6 mb-6">
-            {/* Current plan */}
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -157,39 +161,25 @@ export default function BillingPage() {
                       <span className="text-2xl font-bold text-slate-900">
                         {billing.planName}
                       </span>
-                      <Badge
-                        className={
-                          billing.planName === 'Free'
-                            ? 'bg-slate-100 text-slate-800'
-                            : billing.hasActiveSubscription
-                            ? 'bg-green-100 text-green-800'
-                            : 'bg-yellow-100 text-yellow-800'
-                        }
-                      >
-                        {billing.planName === 'Free'
-                          ? 'free'
-                          : billing.hasActiveSubscription
-                          ? 'active'
-                          : 'inactive'}
-                      </Badge>
+                      <Badge className={badgeClass}>{badgeText}</Badge>
                     </div>
                     <p className="text-sm text-slate-600">
                       {billing.usageLimit.toLocaleString()} requests/month
                     </p>
                   </div>
 
-                  {billing.nextBillingDate && (
+                  {formattedNextBillingDate && (
                     <div className="pt-4 border-t">
                       <div className="flex items-center gap-2 text-sm text-slate-600">
                         <Calendar className="h-4 w-4" />
-                        Next billing: {billing.nextBillingDate}
+                        Next billing: {formattedNextBillingDate}
                       </div>
                     </div>
                   )}
                 </div>
               </CardContent>
               <CardFooter className="flex gap-2">
-                {billing.hasActiveSubscription && (
+                {showManageBilling && (
                   <Button
                     variant="outline"
                     className="flex-1"
@@ -209,7 +199,6 @@ export default function BillingPage() {
               </CardFooter>
             </Card>
 
-            {/* Usage */}
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
@@ -262,8 +251,6 @@ export default function BillingPage() {
             </Card>
           </div>
 
-          {/* Plan comparison — driven by PLANS so it never drifts from the
-              source of truth when limits or names change. */}
           <Card>
             <CardHeader>
               <CardTitle>Need More Requests?</CardTitle>
