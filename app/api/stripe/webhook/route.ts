@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import { getStripe } from '@/lib/stripe';
 import { getDb } from '@/lib/db';
-import { PLANS, getPlanById, type PlanId } from '@/lib/plans';
+import { PLANS, type PlanId } from '@/lib/plans';
 import { generateApiKey, hashApiKey } from '@/lib/hash';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -62,9 +62,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Could not read body' }, { status: 400 });
   }
 
-  // Use request.headers directly — simpler and more reliable than importing
-  // headers() from next/headers, which requires an active App Router async
-  // context and adds an unnecessary await.
   const signature = request.headers.get('stripe-signature');
 
   if (!signature) {
@@ -102,11 +99,9 @@ export async function POST(request: NextRequest) {
         break;
 
       default:
-        // Acknowledge without processing — Stripe retries unacknowledged events
         break;
     }
   } catch (err) {
-    // Return 500 so Stripe retries the event. Log the full error for debugging.
     console.error(`[webhook] Error handling ${event.type} (id: ${event.id}):`, err);
     return NextResponse.json({ error: 'Handler failed' }, { status: 500 });
   }
@@ -121,7 +116,7 @@ export async function POST(request: NextRequest) {
  * This is the single place we provision access.
  *
  * IMPORTANT: metadata.userId must be set when creating the checkout session
- * so we can link the subscription to the right user/API key.  Without it we
+ * so we can link the subscription to the right user/API key. Without it we
  * cannot attribute access to anyone.
  * See checkout route: metadata: { planId, userId: session.user.id }
  */
@@ -147,27 +142,18 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     return;
   }
 
-  // Warn loudly if userId is missing — access will be created but not linked.
   if (!metadata?.userId) {
-    console.warn(
-      '[webhook] checkout.session.completed missing metadata.userId. ' +
-        'The API key will be created but cannot be linked to a user account. ' +
-        'Add userId to checkout session metadata.'
-    );
+    throw new Error('checkout.session.completed missing metadata.userId');
   }
 
-  const customerId     = typeof customer     === 'string' ? customer     : customer.id;
+  const customerId = typeof customer === 'string' ? customer : customer.id;
   const subscriptionId = typeof subscription === 'string' ? subscription : subscription.id;
 
   console.log(`[webhook] customerId=${customerId} subscriptionId=${subscriptionId}`);
 
-  // Cast to any once here — db.ts has no Database generic, so every table
-  // resolves to `never` without it.  A single cast is cleaner than sprinkling
-  // `as any` on every individual query.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db = getDb() as any;
 
-  // Idempotency guard: if this event was already processed, skip it.
   const { data: existingSub } = await db
     .from('subscriptions')
     .select('id, api_key_id')
@@ -175,12 +161,10 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
     .maybeSingle();
 
   if (existingSub) {
-    // Already processed (e.g. Stripe retried the event). Nothing to do.
     console.log(`[webhook] Already processed subscriptionId=${subscriptionId}, skipping.`);
     return;
   }
 
-  // Fetch the full subscription to get the priceId.
   const subscriptionData = await getStripe().subscriptions.retrieve(subscriptionId);
 
   const firstItem = subscriptionData.items?.data?.[0];
@@ -208,8 +192,6 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
   const plan = getPlanByStripePriceId(priceId);
 
   if (!plan) {
-    // Throw (not return) so Stripe retries — this could be a transient config
-    // issue (e.g. env vars not yet deployed) rather than a permanent bad event.
     console.error('[webhook] No plan mapped for priceId. Check env vars.', {
       priceId,
       STRIPE_PRICE_STARTER: process.env.STRIPE_PRICE_STARTER ?? '(not set)',
@@ -222,86 +204,90 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session) {
 
   // ── Provision the API key ────────────────────────────────────────────────
   //
-  // Look for an existing key tied to this Stripe customer first — upgrades
+  // Look for an existing key tied to this user first — upgrades
   // should update the limit on the existing key, not create a second one.
 
   let apiKeyId: string;
   let rawKey: string | null = null;
 
-  const { data: existingKey } = await db
+  const { data: existingKey } = (await db
     .from('api_keys')
     .select('id')
     .eq('user_id', metadata.userId)
-    .maybeSingle() as { data: { id: string } | null };
+    .maybeSingle()) as { data: { id: string } | null };
 
   if (existingKey) {
     apiKeyId = existingKey.id;
-    // Update the limit in place — don't generate a new key on upgrade.
+
     await db
       .from('api_keys')
       .update({ monthly_limit: plan.monthlyLimit, is_active: true })
       .eq('id', apiKeyId);
+
     console.log(`[webhook] Updated existing api_key id=${apiKeyId}`);
   } else {
-    // New customer: generate a real cryptographic key and store only its hash.
     rawKey = generateApiKey();
     const keyHash = hashApiKey(rawKey);
 
-    const { data: newKey, error: insertError } = await db
+    const { data: newKey, error: insertError } = (await db
       .from('api_keys')
       .insert({
         name: `${plan.id.charAt(0).toUpperCase() + plan.id.slice(1)} Plan`,
         key_hash: keyHash,
         monthly_limit: plan.monthlyLimit,
         is_active: true,
-        userId: metadata.userId,
         ...(metadata?.userId ? { user_id: metadata.userId } : {}),
       })
       .select('id')
-      .single() as { data: { id: string } | null; error: unknown };
+      .single()) as { data: { id: string } | null; error: unknown };
 
     if (insertError || !newKey) {
       console.error('[webhook] Failed to insert API key', insertError);
-      // Throw so Stripe retries. The idempotency guard above prevents
-      // double-insertion once a retry succeeds.
       throw new Error('Failed to insert API key');
     }
 
     apiKeyId = newKey.id;
     console.log(`[webhook] Created new api_key id=${apiKeyId}`);
+
+    const { error: pendingKeyError } = await db
+      .from('pending_api_keys')
+      .insert({
+        user_id: metadata.userId,
+        api_key_id: apiKeyId,
+        raw_key: rawKey,
+      });
+
+    if (pendingKeyError) {
+      console.error('[webhook] Failed to insert pending API key', pendingKeyError);
+      throw new Error('Failed to insert pending API key');
+    }
+
+    console.log(`[webhook] Stored pending raw API key for api_key_id=${apiKeyId}`);
   }
 
   // TODO: deliver rawKey to the user.
-  // Options (pick one):
-  //   1. Store temporarily in a `pending_api_keys` table; read on success page
-  //   2. Send a transactional email via Resend / SendGrid
-  //   3. Encrypt and embed in the Stripe success_url as a query param
-  // Without this step the user receives no key to authenticate with.
+  // Current implementation stores it temporarily in pending_api_keys for
+  // one-time retrieval on a success page, billing page, or dashboard.
   if (rawKey) {
     console.log(
       `[ACTION REQUIRED] New API key created for customer ${customerId}. ` +
-        `Raw key must be delivered to the user. keyId=${apiKeyId}`
+        `Raw key is stored in pending_api_keys for delivery. keyId=${apiKeyId}`
     );
   }
 
   // ── Record the subscription ──────────────────────────────────────────────
 
-  // current_period_end is not guaranteed to be a top-level typed property
-  // for all pinned Stripe API versions. Read it through a plain Record cast
-  // and convert safely — an invalid epoch used to crash toISOString() here
-  // and silently abort the insert (while the api_keys write above succeeded).
   const rawPeriodEnd = subscriptionData.items?.data?.[0]?.current_period_end;
   console.log(`[webhook] current_period_end raw value:`, rawPeriodEnd);
   const currentPeriodEnd = epochToISOSafe(rawPeriodEnd, 'current_period_end');
 
   const { error: subError } = await db.from('subscriptions').insert({
+    user_id: metadata.userId,
     api_key_id: apiKeyId,
     stripe_customer_id: customerId,
     stripe_subscription_id: subscriptionId,
     plan: plan.id,
     status: subscriptionData.status,
-    // null is intentional — the column should allow it so a bad epoch never
-    // blocks the row from being inserted at all.
     current_period_end: currentPeriodEnd,
   });
 
@@ -342,24 +328,20 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db = getDb() as any;
 
-  const { data: existingSub } = await db
+  const { data: existingSub } = (await db
     .from('subscriptions')
     .select('api_key_id')
     .eq('stripe_subscription_id', subscription.id)
-    .maybeSingle() as { data: { api_key_id: string } | null };
+    .maybeSingle()) as { data: { api_key_id: string } | null };
 
   if (!existingSub) {
-    // Can happen if checkout.session.completed hasn't been processed yet.
-    // Stripe event ordering is not guaranteed. The checkout handler will
-    // create the record; this event can be safely ignored for now.
     console.warn('[webhook] subscription.updated received before checkout.session.completed', {
       subscriptionId: subscription.id,
     });
     return;
   }
 
-  const isActive =
-    subscription.status === 'active' || subscription.status === 'trialing';
+  const isActive = subscription.status === 'active' || subscription.status === 'trialing';
 
   const rawPeriodEnd = subscription.items?.data?.[0]?.current_period_end;
   console.log(`[webhook] current_period_end raw value:`, rawPeriodEnd);
@@ -398,11 +380,11 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db = getDb() as any;
 
-  const { data: existingSub } = await db
+  const { data: existingSub } = (await db
     .from('subscriptions')
     .select('api_key_id')
     .eq('stripe_subscription_id', subscription.id)
-    .maybeSingle() as { data: { api_key_id: string } | null };
+    .maybeSingle()) as { data: { api_key_id: string } | null };
 
   if (!existingSub) {
     console.error('[webhook] subscription.deleted: subscription not found', {
@@ -416,8 +398,6 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription) {
     .update({ status: 'canceled', updated_at: new Date().toISOString() })
     .eq('stripe_subscription_id', subscription.id);
 
-  // Downgrade to free tier limits — not deactivation.
-  // Hard-deactivating would break the customer's integration immediately.
   await db
     .from('api_keys')
     .update({ monthly_limit: FREE_LIMIT, is_active: true })
